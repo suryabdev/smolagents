@@ -2,10 +2,10 @@ from smolagents import (
     CodeAgent,
     InferenceClientModel,
     LiteLLMModel,
+    LlamaCppModel,
     OpenAIModel,
     ToolCallingAgent,
     TransformersModel,
-    LlamaCppModel,
     tool,
 )
 

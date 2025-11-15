@@ -28,6 +28,7 @@ from .monitoring import TokenUsage
 from .tools import Tool
 from .utils import RateLimiter, Retrying, _is_package_available, encode_image_base64, make_image_url, parse_json_blob
 
+
 if TYPE_CHECKING:
     from transformers import StoppingCriteriaList
 
@@ -874,9 +875,9 @@ class LlamaCppModel(Model):
 
     def __init__(
         self,
-        model_path: Optional[str] = None,
-        repo_id: Optional[str] = None,
-        filename: Optional[str] = None,
+        model_path: str | None = None,
+        repo_id: str | None = None,
+        filename: str | None = None,
         n_gpu_layers: int = 0,
         n_ctx: int = 8192,
         max_tokens: int = 1024,
@@ -923,10 +924,10 @@ class LlamaCppModel(Model):
 
     def __call__(
         self,
-        messages: List[Dict[str, str]],
-        stop_sequences: Optional[List[str]] = None,
-        grammar: Optional[str] = None,
-        tools_to_call_from: Optional[List[Tool]] = None,
+        messages: list[dict[str, str]],
+        stop_sequences: list[str] | None = None,
+        grammar: str | None = None,
+        tools_to_call_from: list[Tool] | None = None,
         **kwargs,
     ) -> ChatMessage:
         """
