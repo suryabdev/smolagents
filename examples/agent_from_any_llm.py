@@ -1,18 +1,24 @@
-from typing import Optional
-
-from smolagents import HfApiModel, LiteLLMModel, TransformersModel, LlamaCppModel, tool
-from smolagents.agents import CodeAgent, ToolCallingAgent
+from smolagents import (
+    CodeAgent,
+    InferenceClientModel,
+    LiteLLMModel,
+    OpenAIModel,
+    ToolCallingAgent,
+    TransformersModel,
+    LlamaCppModel,
+    tool,
+)
 
 
 # Choose which inference type to use!
 
-available_inferences = ["hf_api", "transformers", "ollama", "litellm", "llama_cpp"]
-chosen_inference = "llama_cpp"
+available_inferences = ["inference_client", "transformers", "ollama", "litellm", "openai", "llama_cpp"]
+chosen_inference = "inference_client"
 
 print(f"Chose model: '{chosen_inference}'")
 
-if chosen_inference == "hf_api":
-    model = HfApiModel(model_id="meta-llama/Llama-3.3-70B-Instruct")
+if chosen_inference == "inference_client":
+    model = InferenceClientModel(model_id="meta-llama/Llama-3.3-70B-Instruct", provider="nebius")
 
 elif chosen_inference == "transformers":
     model = TransformersModel(model_id="HuggingFaceTB/SmolLM2-1.7B-Instruct", device_map="auto", max_new_tokens=1000)
@@ -29,6 +35,10 @@ elif chosen_inference == "litellm":
     # For anthropic: change model_id below to 'anthropic/claude-3-5-sonnet-latest'
     model = LiteLLMModel(model_id="gpt-4o")
 
+elif chosen_inference == "openai":
+    # For anthropic: change model_id below to 'anthropic/claude-3-5-sonnet-latest'
+    model = OpenAIModel(model_id="gpt-4o")
+
 elif chosen_inference == "llama_cpp":
     model = LlamaCppModel(
         repo_id="unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
@@ -37,7 +47,7 @@ elif chosen_inference == "llama_cpp":
     )
 
 @tool
-def get_weather(location: str, celsius: Optional[bool] = False) -> str:
+def get_weather(location: str, celsius: bool | None = False) -> str:
     """
     Get weather in the next days at given location.
     Secretly this tool does not care about the location, it hates the weather everywhere.
@@ -49,8 +59,10 @@ def get_weather(location: str, celsius: Optional[bool] = False) -> str:
     return "The weather is UNGODLY with torrential rains and temperatures below -10°C"
 
 
-agent = ToolCallingAgent(model=model, tools=[get_weather], max_steps=1)
+agent = ToolCallingAgent(tools=[get_weather], model=model, verbosity_level=2)
+
 print("ToolCallingAgent:", agent.run("What's the weather like in Paris?"))
 
-agent = CodeAgent(model=model, tools=[get_weather])
+agent = CodeAgent(tools=[get_weather], model=model, verbosity_level=2, stream_outputs=True)
+
 print("CodeAgent:", agent.run("What's the weather like in Paris?"))
