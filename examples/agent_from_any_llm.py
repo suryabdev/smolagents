@@ -46,6 +46,7 @@ elif chosen_inference == "llama_cpp":
         n_ctx=8192,
     )
 
+
 @tool
 def get_weather(location: str, celsius: bool | None = False) -> str:
     """

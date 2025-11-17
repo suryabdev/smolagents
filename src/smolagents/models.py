@@ -826,34 +826,34 @@ class MLXModel(Model):
 
 class LlamaCppModel(Model):
     """
-        A class to interact with llama.cpp models, providing proper parameter handling and conditional tool usage.
+    A class to interact with llama.cpp models, providing proper parameter handling and conditional tool usage.
+    It supports loading models either from a local path or via Hugging Face's repository.
+    The class is designed to handle parameters efficiently and integrates tool usage only when tools are explicitly provided.
 
-    This model facilitates communication with llama.cpp-based language models. It supports loading models either from a local path or via Hugging Face's repository. The class is designed to handle parameters efficiently and integrates tool usage only when tools are explicitly provided.
+    > [!TIP]
 
-    > **Tip**
-    > Ensure that the `llama.cpp` library and its Python bindings are correctly installed and configured in your environment. Refer to the official [llama.cpp documentation](https://github.com/ggerganov/llama.cpp) for installation instructions.
+    > Ensure that the `llama.cpp` library and its Python bindings are correctly installed and configured in your environment.
+    > Please run `pip install 'smolagents[llama-cpp]'` or `pip install llama-cpp-python`
+    > (with appropriate flags like `CMAKE_ARGS='-DLLAMA_CUBLAS=on'` for GPU support).
+    > Refer to the official [llama.cpp documentation](https://github.com/ggerganov/llama.cpp) for additional information.
 
-    ### **Parameters:**
+    Parameters:
         model_path (`str`, *optional*, defaults to `None`):
-            Path to the local llama.cpp model file.
+            The file path to the GGUF model.
         repo_id (`str`, *optional*, defaults to `None`):
             Hugging Face repository ID if loading the model from Hugging Face.
         filename (`str`, *optional*, defaults to `None`):
             Specific filename to load from the Hugging Face repository.
-        n_gpu_layers (`int`, *optional*, defaults to `0`):
-            Number of GPU layers to utilize for model inference.
-        n_ctx (`int`, *optional*, defaults to `8192`):
-            Context size for the model, determining the maximum number of tokens the model can process in a single input.
-        max_tokens (`int`, *optional*, defaults to `1024`):
-            Maximum number of tokens to generate in the model's response.
-        **kwargs (`dict`, *optional*):
-            Additional keyword arguments to pass to the underlying llama.cpp model. This can include parameters like `temperature`, `top_p`, etc.
-
-    ### **Raises:**
+        model_kwargs (`dict[str, Any]`, *optional*):
+            Additional keyword arguments to pass to the `llama_cpp.Llama`
+            constructor (e.g., `n_gpu_layers`, `n_ctx`, `verbose`).
+        **kwargs:
+            Additional keyword arguments to forward to the underlying
+            `create_chat_completion` call (e.g., `temperature`, `max_tokens`).
+    Raises:
         ValueError:
             If neither `model_path` nor both `repo_id` and `filename` are provided during initialization.
-
-    ### **Example:**
+    Example:
     ```python
     >>> from smolagents import LlamaCppModel, CodeAgent
     >>> sql_engine = SQLTool(...)  # Assume SQLTool is predefined
@@ -878,118 +878,334 @@ class LlamaCppModel(Model):
         model_path: str | None = None,
         repo_id: str | None = None,
         filename: str | None = None,
-        n_gpu_layers: int = 0,
-        n_ctx: int = 8192,
-        max_tokens: int = 1024,
+        model_kwargs: dict[str, Any] | None = None,
         **kwargs,
     ):
-        """
-        Initializes the LlamaCppModel.
+        if not _is_package_available("llama_cpp"):
+            raise ModuleNotFoundError(
+                "Please install 'llama-cpp-python' to use LlamaCppModel. "
+                "You can install it with GPU support, e.g.: "
+                "`CMAKE_ARGS='-DLLAMA_CUBLAS=on' pip install 'smolagents[llama-cpp]'`"
+            )
 
-        Parameters:
-            model_path (str, optional): Path to the local model file.
-            repo_id (str, optional): Hugging Face repository ID if loading from Hugging Face.
-            filename (str, optional): Specific filename to load from the repository.
-            n_gpu_layers (int, default=0): Number of GPU layers to use.
-            n_ctx (int, default=8192): Context size for the model.
-            **kwargs: Additional keyword arguments.
-        Raises:
-            ValueError: If neither model_path nor repo_id+filename are provided.
-        """
         from llama_cpp import Llama
 
-        super().__init__(**kwargs)
-        self.max_tokens = max_tokens
+        self.model_kwargs = model_kwargs or {}
+        self._is_vlm = "clip_model_path" in self.model_kwargs
+        # self.model_kwargs.setdefault("chat_format", "auto")
 
+        super().__init__(model_id=model_path, flatten_messages_as_text=True, **kwargs)
+
+        # self.model = Llama(model_path=model_path, **self.model_kwargs)
         if model_path:
-            self.llm = Llama(
+            self.model = Llama(
                 model_path=model_path,
-                n_gpu_layers=n_gpu_layers,
-                n_ctx=n_ctx,
-                max_tokens=max_tokens,
-                verbose=False
+                # n_gpu_layers=n_gpu_layers,
+                # n_ctx=n_ctx,
+                # max_tokens=max_tokens,
+                **self.model_kwargs,
+                verbose=False,
             )
         elif repo_id and filename:
-            self.llm = Llama.from_pretrained(
+            self.model = Llama.from_pretrained(
                 repo_id=repo_id,
                 filename=filename,
-                n_gpu_layers=n_gpu_layers,
-                n_ctx=n_ctx,
-                max_tokens=max_tokens,
-                verbose=False,
-                **kwargs
+                # n_gpu_layers=n_gpu_layers,
+                # n_ctx=n_ctx,
+                # max_tokens=100,
+                n_gpu_layers=-1,
+                **self.model_kwargs,
+                verbose=True,
+                # **kwargs,
             )
         else:
             raise ValueError("Must provide either model_path or repo_id+filename")
 
-    def __call__(
+    def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[ChatMessage | dict],
         stop_sequences: list[str] | None = None,
-        grammar: str | None = None,
+        response_format: dict[str, str] | None = None,
         tools_to_call_from: list[Tool] | None = None,
         **kwargs,
     ) -> ChatMessage:
-        """
-        Generates a response from the llama.cpp model and integrates tool usage *only if tools are provided*.
-        """
-        from llama_cpp import LlamaGrammar
-        try:
-            completion_kwargs = self._prepare_completion_kwargs(
-                messages=messages,
-                stop_sequences=stop_sequences,
-                grammar=grammar,
-                tools_to_call_from=tools_to_call_from,
-                flatten_messages_as_text=True,
-                **kwargs
+        completion_kwargs = self._prepare_completion_kwargs(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            response_format=response_format,
+            tools_to_call_from=tools_to_call_from,
+            convert_images_to_image_urls=False,
+            **kwargs,
+        )
+
+        print(completion_kwargs)
+        print("HEREE 1")
+        response = self.model.create_chat_completion(**completion_kwargs)
+        print("HEREE 2")
+
+        choice = response["choices"][0]
+        message = choice["message"]
+        content = message.get("content")
+        tool_calls_raw = message.get("tool_calls")
+
+        parsed_tool_calls = None
+        if tool_calls_raw:
+            parsed_tool_calls = [
+                ChatMessageToolCall(
+                    id=tc["id"],
+                    type=tc["type"],
+                    function=ChatMessageToolCallFunction(
+                        name=tc["function"]["name"], arguments=tc["function"]["arguments"]
+                    ),
+                )
+                for tc in tool_calls_raw
+            ]
+
+        parsed_token_usage = None
+        usage_raw = response.get("usage")
+        if usage_raw:
+            parsed_token_usage = TokenUsage(
+                input_tokens=usage_raw["prompt_tokens"], output_tokens=usage_raw["completion_tokens"]
             )
 
-            if not tools_to_call_from:
-                completion_kwargs.pop("tools", None)
-                completion_kwargs.pop("tool_choice", None)
+        return ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content=content,
+            tool_calls=parsed_tool_calls,
+            raw=response,
+            token_usage=parsed_token_usage,
+        )
 
-            filtered_kwargs = {
-                k: v for k, v in completion_kwargs.items()
-                if k not in ["messages", "stop", "grammar", "max_tokens", "tools_to_call_from"]
-            }
-            max_new_tokens = (
-                kwargs.get("max_new_tokens")
-                or kwargs.get("max_tokens")
-                or self.kwargs.get("max_new_tokens")
-                or self.kwargs.get("max_tokens")
-            )
+    def generate_stream(
+        self,
+        messages: list[ChatMessage | dict],
+        stop_sequences: list[str] | None = None,
+        response_format: dict[str, str] | None = None,
+        tools_to_call_from: list[Tool] | None = None,
+        **kwargs,
+    ) -> Generator[ChatMessageStreamDelta, None, None]:
+        completion_kwargs = self._prepare_completion_kwargs(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            response_format=response_format,
+            tools_to_call_from=tools_to_call_from,
+            convert_images_to_image_urls=False,
+            **kwargs,
+        )
 
-            if max_new_tokens:
-                completion_kwargs["max_new_tokens"] = max_new_tokens
+        stream = self.model.create_chat_completion(
+            **completion_kwargs, stream=True, stream_options={"include_usage": True}
+        )
 
-            response = self.llm.create_chat_completion(
-                messages=completion_kwargs["messages"],
-                stop=completion_kwargs.get("stop", []),
-                grammar=LlamaGrammar.from_string(grammar) if grammar else None,
-                max_tokens=completion_kwargs["max_new_tokens"],
-                **filtered_kwargs
-            )
+        for event in stream:
+            if event.get("usage"):
+                usage_data = event["usage"]
+                yield ChatMessageStreamDelta(
+                    content="",
+                    token_usage=TokenUsage(
+                        input_tokens=usage_data["prompt_tokens"],
+                        output_tokens=usage_data["completion_tokens"],
+                    ),
+                )
+            if event.get("choices"):
+                choice = event["choices"][0]
+                if choice.get("delta"):
+                    delta = choice["delta"]
+                    parsed_tool_call_deltas = None
+                    if delta.get("tool_calls"):
+                        parsed_tool_call_deltas = []
+                        for tc_delta in delta["tool_calls"]:
+                            func_delta = tc_delta.get("function")
+                            parsed_func = None
+                            if func_delta:
+                                parsed_func = ChatMessageToolCallFunction(
+                                    name=func_delta.get("name") or "",
+                                    arguments=func_delta.get("arguments") or "",
+                                )
 
-            content = response["choices"][0]["message"]["content"]
-            if stop_sequences:
-                content = remove_stop_sequences(content, stop_sequences)
+                            parsed_tool_call_deltas.append(
+                                ChatMessageToolCallStreamDelta(
+                                    index=tc_delta["index"],
+                                    id=tc_delta.get("id"),
+                                    type=tc_delta.get("type"),
+                                    function=parsed_func,
+                                )
+                            )
+                    yield ChatMessageStreamDelta(
+                        content=delta.get("content"),
+                        tool_calls=parsed_tool_call_deltas,
+                    )
+                else:
+                    if not choice.get("finish_reason"):
+                        raise ValueError(f"No content, tool calls, or finish reason in event: {event}")
 
-            message = ChatMessage(role="assistant", content=content)
 
-            if tools_to_call_from:
-                message = parse_tool_args_if_needed(message)
+# class LlamaCppModelDuplicate(Model):
+#     """
+#         A class to interact with llama.cpp models, providing proper parameter handling and conditional tool usage.
 
-            if "usage" in response:
-                self.last_input_token_count = response["usage"].get("prompt_tokens", 0)
-                self.last_output_token_count = response["usage"].get("completion_tokens", 0)
-            else:
-                self.last_input_token_count = 0
-                self.last_output_token_count = 0
+#     This model facilitates communication with llama.cpp-based language models. It supports loading models either from a local path or via Hugging Face's repository. The class is designed to handle parameters efficiently and integrates tool usage only when tools are explicitly provided.
 
-            return message
-        except Exception as e:
-            logger.error(f"Model error: {e}")
-            return ChatMessage(role="assistant", content=f"Error: {str(e)}")
+#     > **Tip**
+#     > Ensure that the `llama.cpp` library and its Python bindings are correctly installed and configured in your environment. Refer to the official [llama.cpp documentation](https://github.com/ggerganov/llama.cpp) for installation instructions.
+
+#     ### **Parameters:**
+#         model_path (`str`, *optional*, defaults to `None`):
+#             Path to the local llama.cpp model file.
+#         repo_id (`str`, *optional*, defaults to `None`):
+#             Hugging Face repository ID if loading the model from Hugging Face.
+#         filename (`str`, *optional*, defaults to `None`):
+#             Specific filename to load from the Hugging Face repository.
+#         n_gpu_layers (`int`, *optional*, defaults to `0`):
+#             Number of GPU layers to utilize for model inference.
+#         n_ctx (`int`, *optional*, defaults to `8192`):
+#             Context size for the model, determining the maximum number of tokens the model can process in a single input.
+#         max_tokens (`int`, *optional*, defaults to `1024`):
+#             Maximum number of tokens to generate in the model's response.
+#         **kwargs (`dict`, *optional*):
+#             Additional keyword arguments to pass to the underlying llama.cpp model. This can include parameters like `temperature`, `top_p`, etc.
+
+#     ### **Raises:**
+#         ValueError:
+#             If neither `model_path` nor both `repo_id` and `filename` are provided during initialization.
+
+#     ### **Example:**
+#     ```python
+#     >>> from smolagents import LlamaCppModel, CodeAgent
+#     >>> sql_engine = SQLTool(...)  # Assume SQLTool is predefined
+#     >>> model = LlamaCppModel(
+#     ...     repo_id="unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+#     ...     filename="DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf",
+#     ...     n_ctx=8192,
+#     ...     max_tokens=8192,
+#     ... )
+#     >>> agent = CodeAgent(
+#     ...     tools=[sql_engine],
+#     ...     model=model,
+#     ... )
+#     >>> response = agent.run("Can you give me the name of the client who got the most expensive receipt?")
+#     >>> print(response.content)
+#     "The client with the most expensive receipt is Jane Doe."
+#     ```
+#     """
+
+#     def __init__(
+#         self,
+#         model_path: str | None = None,
+#         repo_id: str | None = None,
+#         filename: str | None = None,
+#         n_gpu_layers: int = 0,
+#         n_ctx: int = 8192,
+#         max_tokens: int = 1024,
+#         **kwargs,
+#     ):
+#         """
+#         Initializes the LlamaCppModel.
+
+#         Parameters:
+#             model_path (str, optional): Path to the local model file.
+#             repo_id (str, optional): Hugging Face repository ID if loading from Hugging Face.
+#             filename (str, optional): Specific filename to load from the repository.
+#             n_gpu_layers (int, default=0): Number of GPU layers to use.
+#             n_ctx (int, default=8192): Context size for the model.
+#             **kwargs: Additional keyword arguments.
+#         Raises:
+#             ValueError: If neither model_path nor repo_id+filename are provided.
+#         """
+#         from llama_cpp import Llama
+
+#         super().__init__(**kwargs)
+#         self.max_tokens = max_tokens
+
+#         if model_path:
+#             self.llm = Llama(
+#                 model_path=model_path,
+#                 n_gpu_layers=n_gpu_layers,
+#                 n_ctx=n_ctx,
+#                 max_tokens=max_tokens,
+#                 verbose=False
+#             )
+#         elif repo_id and filename:
+#             self.llm = Llama.from_pretrained(
+#                 repo_id=repo_id,
+#                 filename=filename,
+#                 n_gpu_layers=n_gpu_layers,
+#                 n_ctx=n_ctx,
+#                 max_tokens=max_tokens,
+#                 verbose=False,
+#                 **kwargs
+#             )
+#         else:
+#             raise ValueError("Must provide either model_path or repo_id+filename")
+
+#     def __call__(
+#         self,
+#         messages: list[dict[str, str]],
+#         stop_sequences: list[str] | None = None,
+#         grammar: str | None = None,
+#         tools_to_call_from: list[Tool] | None = None,
+#         **kwargs,
+#     ) -> ChatMessage:
+#         """
+#         Generates a response from the llama.cpp model and integrates tool usage *only if tools are provided*.
+#         """
+#         from llama_cpp import LlamaGrammar
+#         try:
+#             completion_kwargs = self._prepare_completion_kwargs(
+#                 messages=messages,
+#                 stop_sequences=stop_sequences,
+#                 grammar=grammar,
+#                 tools_to_call_from=tools_to_call_from,
+#                 flatten_messages_as_text=True,
+#                 **kwargs
+#             )
+
+#             if not tools_to_call_from:
+#                 completion_kwargs.pop("tools", None)
+#                 completion_kwargs.pop("tool_choice", None)
+
+#             filtered_kwargs = {
+#                 k: v for k, v in completion_kwargs.items()
+#                 if k not in ["messages", "stop", "grammar", "max_tokens", "tools_to_call_from"]
+#             }
+#             max_new_tokens = (
+#                 kwargs.get("max_new_tokens")
+#                 or kwargs.get("max_tokens")
+#                 or self.kwargs.get("max_new_tokens")
+#                 or self.kwargs.get("max_tokens")
+#             )
+
+#             if max_new_tokens:
+#                 completion_kwargs["max_new_tokens"] = max_new_tokens
+
+#             response = self.llm.create_chat_completion(
+#                 messages=completion_kwargs["messages"],
+#                 stop=completion_kwargs.get("stop", []),
+#                 grammar=LlamaGrammar.from_string(grammar) if grammar else None,
+#                 max_tokens=completion_kwargs["max_new_tokens"],
+#                 **filtered_kwargs
+#             )
+
+#             content = response["choices"][0]["message"]["content"]
+#             if stop_sequences:
+#                 content = remove_stop_sequences(content, stop_sequences)
+
+#             message = ChatMessage(role="assistant", content=content)
+
+#             if tools_to_call_from:
+#                 message = parse_tool_args_if_needed(message)
+
+#             if "usage" in response:
+#                 self.last_input_token_count = response["usage"].get("prompt_tokens", 0)
+#                 self.last_output_token_count = response["usage"].get("completion_tokens", 0)
+#             else:
+#                 self.last_input_token_count = 0
+#                 self.last_output_token_count = 0
+
+#             return message
+#         except Exception as e:
+#             logger.error(f"Model error: {e}")
+#             return ChatMessage(role="assistant", content=f"Error: {str(e)}")
 
 
 class TransformersModel(Model):
